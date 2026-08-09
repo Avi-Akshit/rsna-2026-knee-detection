@@ -1,0 +1,9 @@
+torch
+torchvision
+timm
+pandas
+numpy
+opencv-python
+pydicom
+scikit-learn
+transformers
