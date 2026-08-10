@@ -1,73 +1,101 @@
+import os
+from pathlib import Path
+from typing import Dict
+import numpy as np
+import pandas as pd
+import cv2
+import pydicom
 import torch
-import torch.nn as nn
-import torchvision.models as models
+from torch.utils.data import Dataset
 from config import cfg
 
-class AsymmetricLoss(nn.Module):
-    """
-    Asymmetric Loss for Multi-Label Classification
-    Handles heavy class imbalance by discounting easy negative samples.
-    """
-    def __init__(self, gamma_neg: float = 4.0, gamma_pos: float = 1.0, clip: float = 0.05, eps: float = 1e-8):
-        super().__init__()
-        self.gamma_neg = gamma_neg
-        self.gamma_pos = gamma_pos
-        self.clip = clip
-        self.eps = eps
+class RSNAKneeDataset(Dataset):
+    def __init__(self, df: pd.DataFrame, is_train: bool = True, transform=None):
+        self.df = df.reset_index(drop=True)
+        self.is_train = is_train
+        self.transform = transform
 
-    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        x_sigmoid = torch.sigmoid(x)
-        xs_pos = x_sigmoid
-        xs_neg = 1.0 - x_sigmoid
+    def __len__(self) -> int:
+        return len(self.df)
 
-        if self.clip is not None and self.clip > 0:
-            xs_neg = (xs_neg + self.clip).clamp(max=1.0)
+    def _read_dicom_slice(self, path: Path) -> np.ndarray:
+        try:
+            dcm = pydicom.dcmread(path)
+            img = dcm.pixel_array.astype(np.float32)
+            
+            window_center = getattr(dcm, "WindowCenter", None)
+            window_width = getattr(dcm, "WindowWidth", None)
 
-        los_pos = y * torch.log(xs_pos.clamp(min=self.eps))
-        los_neg = (1.0 - y) * torch.log(xs_neg.clamp(min=self.eps))
+            if isinstance(window_center, pydicom.multival.MultiValue):
+                window_center = window_center[0]
+            if isinstance(window_width, pydicom.multival.MultiValue):
+                window_width = window_width[0]
 
-        pt0 = xs_pos * y
-        pt1 = xs_neg * (1.0 - y)
-        pt = pt0 + pt1
+            if window_center is not None and window_width is not None:
+                img_min = window_center - (window_width / 2.0)
+                img_max = window_center + (window_width / 2.0)
+                img = np.clip(img, img_min, img_max)
 
-        one_sided_gamma = self.gamma_pos * y + self.gamma_neg * (1.0 - y)
-        one_sided_w = torch.pow(1.0 - pt, one_sided_gamma)
+            img_min, img_max = img.min(), img.max()
+            if img_max - img_min > 0:
+                img = (img - img_min) / (img_max - img_min)
+            else:
+                img = np.zeros_like(img)
 
-        loss = -one_sided_w * (los_pos + los_neg)
-        return loss.sum()
+            return (img * 255.0).astype(np.uint8)
+        except Exception:
+            return np.zeros((cfg.image_size, cfg.image_size), dtype=np.uint8)
 
-class KneeAbnormalityModel(nn.Module):
-    """
-    2.5D Sequence-Pooling Architecture:
-    Passes slices through a 2D CNN Backbone (EfficientNet-B0),
-    pools representations across depth, and classifies 12 abnormality targets.
-    """
-    def __init__(self, num_classes: int = cfg.num_classes):
-        super().__init__()
-        self.backbone = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.DEFAULT)
-        
-        in_features = self.backbone.classifier[1].in_features
-        self.backbone.classifier = nn.Identity()
-        
-        self.head = nn.Sequential(
-            nn.BatchNorm1d(in_features),
-            nn.Linear(in_features, 256),
-            nn.SiLU(),
-            nn.Dropout(0.3),
-            nn.Linear(256, num_classes)
+    def _get_volume_stack(self, series_path: Path) -> np.ndarray:
+        if not series_path.exists():
+            return np.zeros((cfg.image_size, cfg.image_size, cfg.num_slices), dtype=np.uint8)
+
+        slice_files = sorted(
+            list(series_path.glob("*.dcm")),
+            key=lambda x: int(x.stem) if x.stem.isdigit() else x.stem
         )
+        
+        total_slices = len(slice_files)
+        if total_slices == 0:
+            return np.zeros((cfg.image_size, cfg.image_size, cfg.num_slices), dtype=np.uint8)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Input shape: (Batch, Channels=3, Slices=30, H=224, W=224)
-        batch_size, channels, slices, h, w = x.shape
+        indices = np.linspace(0, total_slices - 1, cfg.num_slices, dtype=int)
+        stacked_slices = []
+
+        for idx in indices:
+            img = self._read_dicom_slice(slice_files[idx])
+            img = cv2.resize(img, (cfg.image_size, cfg.image_size), interpolation=cv2.INTER_AREA)
+            stacked_slices.append(img)
+
+        return np.stack(stacked_slices, axis=-1)
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        row = self.df.iloc[idx]
+        study_id = str(row.get("study_id", row.get("StudyInstanceUID", "")))
+        series_id = str(row.get("series_id", ""))
         
-        x = x.permute(0, 2, 1, 3, 4).contiguous()
-        x = x.view(batch_size * slices, channels, h, w)
-        
-        features = self.backbone(x)
-        
-        features = features.view(batch_size, slices, -1)
-        pooled_features = torch.mean(features, dim=1)
-        
-        logits = self.head(pooled_features)
-        return logits
+        series_path = cfg.train_images_dir / study_id / series_id
+        volume = self._get_volume_stack(series_path)
+
+        if self.transform is not None:
+            augmented = self.transform(image=volume)
+            volume = augmented["image"]
+
+        volume = volume.astype(np.float32) / 255.0
+        volume = np.transpose(volume, (2, 0, 1))
+        volume = np.stack([volume] * 3, axis=0)
+
+        data_dict = {
+            "image": torch.tensor(volume, dtype=torch.float32)
+        }
+
+        if self.is_train:
+            available_cols = [col for col in cfg.target_columns if col in row.index]
+            if len(available_cols) == len(cfg.target_columns):
+                labels = row[cfg.target_columns].values.astype(np.float32)
+            else:
+                labels = np.zeros(cfg.num_classes, dtype=np.float32)
+            
+            data_dict["label"] = torch.tensor(labels, dtype=torch.float32)
+
+        return data_dict

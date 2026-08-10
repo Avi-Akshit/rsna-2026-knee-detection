@@ -4,10 +4,6 @@ import torchvision.models as models
 from config import cfg
 
 class AsymmetricLoss(nn.Module):
-    """
-    Asymmetric Loss for Multi-Label Classification
-    Handles heavy class imbalance by discounting easy negative samples.
-    """
     def __init__(self, gamma_neg: float = 4.0, gamma_pos: float = 1.0, clip: float = 0.05, eps: float = 1e-8):
         super().__init__()
         self.gamma_neg = gamma_neg
@@ -37,11 +33,6 @@ class AsymmetricLoss(nn.Module):
         return loss.sum()
 
 class KneeAbnormalityModel(nn.Module):
-    """
-    2.5D Sequence-Pooling Architecture:
-    Passes slices through a 2D CNN Backbone (EfficientNet-B0),
-    pools representations across depth, and classifies 12 abnormality targets.
-    """
     def __init__(self, num_classes: int = cfg.num_classes):
         super().__init__()
         self.backbone = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.DEFAULT)
@@ -58,14 +49,11 @@ class KneeAbnormalityModel(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Input shape: (Batch, Channels=3, Slices=30, H=224, W=224)
         batch_size, channels, slices, h, w = x.shape
-        
         x = x.permute(0, 2, 1, 3, 4).contiguous()
         x = x.view(batch_size * slices, channels, h, w)
         
         features = self.backbone(x)
-        
         features = features.view(batch_size, slices, -1)
         pooled_features = torch.mean(features, dim=1)
         
