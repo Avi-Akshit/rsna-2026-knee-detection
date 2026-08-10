@@ -11,31 +11,30 @@ class Config:
     seed: int = 42
     debug: bool = False
     
+    # Kaggle Directory Structure
     input_dir: Path = Path("/kaggle/input/rsna-2026-knee-abnormality-detection")
     output_dir: Path = Path("/kaggle/working/artifacts")
     train_csv: Path = field(init=False)
     series_csv: Path = field(init=False)
     train_images_dir: Path = field(init=False)
 
-    image_size: Tuple[int, int] = (384, 384)
-    num_slices: int = 5
-    in_channels: int = 15
+    # Spatial Volume Parameters
+    image_size: int = 224
+    num_slices: int = 30
+    in_channels: int = 3
     
-    model_name: str = "convnext_small.fb_in22k_ft_in1k_384"
-    pretrained: bool = True
+    # Neural Network & Training Parameters
+    model_name: str = "efficientnet_b0"
     num_classes: int = 12
-    drop_rate: float = 0.2
-    drop_path_rate: float = 0.1
-
-    epochs: int = 12
-    batch_size: int = 16
-    accum_steps: int = 2
-    lr: float = 3e-4
+    epochs: int = 10
+    batch_size: int = 8
+    learning_rate: float = 1e-4
     min_lr: float = 1e-6
     weight_decay: float = 1e-2
-    num_workers: int = 4
+    num_workers: int = 2
     use_amp: bool = True
     
+    # 12 RSNA Abnormality Target Columns
     target_columns: List[str] = field(default_factory=lambda: [
         "acl_tear",
         "mcl_tear",
